@@ -240,6 +240,9 @@ Just send a screenshot of the RS portal or an invoice PDF — I'll extract every
 
 *Commands:*
 /summary — today's P&L snapshot
+/recent — last 5 entries from orders, ad spend & payments
+/delete <id> — delete a specific entry by ID
+/deleteall — delete all Telegram-sourced entries
 /help — this message`
       await sendMessage(chatId, help)
       return res.status(200).json({ ok: true })
@@ -275,6 +278,73 @@ ${net >= 0 ? '✅' : '🔴'} Net: ₨${net.toLocaleString()}
 💰 Received from R&S: ₨${received.toLocaleString()}`
 
       await sendMessage(chatId, msg)
+      return res.status(200).json({ ok: true })
+    }
+
+    // /recent command
+    if (text === '/recent') {
+      const db = getServiceClient()
+      const [ordersRes, adsRes, paymentsRes] = await Promise.all([
+        db.from('orders').select('id, date, status, city').eq('source', 'telegram').order('created_at', { ascending: false }).limit(5),
+        db.from('ad_spend').select('id, date, pkr, note').eq('source', 'telegram').order('created_at', { ascending: false }).limit(5),
+        db.from('payments').select('id, date, amount, note').eq('source', 'telegram').order('created_at', { ascending: false }).limit(5)
+      ])
+
+      let msg = `🕐 *Recent Telegram Entries*\n\n`
+
+      const orders = ordersRes.data || []
+      if (orders.length) {
+        msg += `📦 *Orders:*\n`
+        orders.forEach(o => { msg += `• \`${o.id}\` | ${o.date} | ${o.status} | ${o.city || '-'}\n` })
+        msg += '\n'
+      }
+
+      const ads = adsRes.data || []
+      if (ads.length) {
+        msg += `📢 *Ad Spend:*\n`
+        ads.forEach(a => { msg += `• \`${a.id}\` | ${a.date} | ₨${a.pkr} | ${a.note || '-'}\n` })
+        msg += '\n'
+      }
+
+      const payments = paymentsRes.data || []
+      if (payments.length) {
+        msg += `💰 *Payments:*\n`
+        payments.forEach(p => { msg += `• \`${p.id}\` | ${p.date} | ₨${p.amount} | ${p.note || '-'}\n` })
+        msg += '\n'
+      }
+
+      if (!orders.length && !ads.length && !payments.length) {
+        msg += '_No Telegram entries found._'
+      } else {
+        msg += `To delete: /delete <id>`
+      }
+
+      await sendMessage(chatId, msg)
+      return res.status(200).json({ ok: true })
+    }
+
+    // /delete <id> command
+    if (text.startsWith('/delete ')) {
+      const id = text.slice(8).trim()
+      const db = getServiceClient()
+      await Promise.all([
+        db.from('orders').delete().eq('id', id),
+        db.from('ad_spend').delete().eq('id', id),
+        db.from('payments').delete().eq('id', id)
+      ])
+      await sendMessage(chatId, `🗑️ Deleted entry \`${id}\` from all tables (if it existed).`)
+      return res.status(200).json({ ok: true })
+    }
+
+    // /deleteall command
+    if (text === '/deleteall') {
+      const db = getServiceClient()
+      await Promise.all([
+        db.from('orders').delete().eq('source', 'telegram'),
+        db.from('ad_spend').delete().eq('source', 'telegram'),
+        db.from('payments').delete().eq('source', 'telegram')
+      ])
+      await sendMessage(chatId, `🗑️ All Telegram-sourced entries deleted. Historical seed data is untouched.`)
       return res.status(200).json({ ok: true })
     }
 
