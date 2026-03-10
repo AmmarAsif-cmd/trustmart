@@ -2,9 +2,13 @@ import { useState, useEffect, useCallback } from 'react'
 import { supabase } from '../lib/supabase'
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts'
 
-const SELL = 999
-const AVG_DEL = 212
-const ONE_TIME = 1500
+// Fallback constants (overridden by settings table values)
+const DEFAULT_SELL = 999
+const DEFAULT_AVG_DEL = 212
+const DEFAULT_PROD_COST = 135
+const DEFAULT_ONE_TIME = 1500
+const ONE_TIME_MONTH = '2026-01' // month the one-time cost applies to
+
 const SC = { delivered: '#22c55e', returned: '#ef4444', inTransit: '#3b82f6', pending: '#f59e0b', failed: '#f97316' }
 const fmtPKR = n => '₨ ' + Math.round(n || 0).toLocaleString('en-PK')
 const mo = d => d?.slice(0, 7) || ''
@@ -13,6 +17,7 @@ export default function Dashboard() {
   const [orders, setOrders] = useState([])
   const [ads, setAds] = useState([])
   const [payments, setPayments] = useState([])
+  const [settings, setSettings] = useState({})
   const [tab, setTab] = useState('dashboard')
   const [selectedMonth, setSelectedMonth] = useState('all')
   const [loading, setLoading] = useState(true)
@@ -20,24 +25,34 @@ export default function Dashboard() {
   const [search, setSearch] = useState('')
 
   const fetchAll = useCallback(async () => {
-    const [o, a, p] = await Promise.all([
+    const [o, a, p, s] = await Promise.all([
       supabase.from('orders').select('*').order('date', { ascending: false }),
       supabase.from('ad_spend').select('*').order('date', { ascending: false }),
       supabase.from('payments').select('*').order('date', { ascending: false }),
+      supabase.from('settings').select('*'),
     ])
     if (o.data) setOrders(o.data)
     if (a.data) setAds(a.data)
     if (p.data) setPayments(p.data)
+    if (s.data) {
+      const map = {}
+      s.data.forEach(row => { map[row.key] = row.value })
+      setSettings(map)
+    }
     setLoading(false)
     setLastSync(new Date())
   }, [])
 
   useEffect(() => {
     fetchAll()
-    // Auto-refresh every 30 seconds
     const interval = setInterval(fetchAll, 30000)
     return () => clearInterval(interval)
   }, [fetchAll])
+
+  // ── Pull live settings (fall back to defaults) ──
+  const SELL = Number(settings.selling_price) || DEFAULT_SELL
+  const AVG_DEL = Number(settings.avg_delivery_charge) || DEFAULT_AVG_DEL
+  const PROD_COST_DEFAULT = Number(settings.product_cost_new) || DEFAULT_PROD_COST
 
   // ── Filter by month ──
   const byMonth = arr => selectedMonth === 'all' ? arr : arr.filter(x => mo(x.date) === selectedMonth)
@@ -53,15 +68,20 @@ export default function Dashboard() {
   const total = filtOrders.length
   const returnRate = delivered + returned > 0 ? ((returned / (delivered + returned)) * 100).toFixed(1) : 0
   const revenue = delivered * SELL
-  const prodCostTotal = filtOrders.reduce((s, o) => s + (o.product_cost || 190), 0)
+  const prodCostTotal = filtOrders.reduce((s, o) => s + (o.product_cost || PROD_COST_DEFAULT), 0)
   const delCostTotal = total * AVG_DEL
-  const oneTime = selectedMonth === 'all' || selectedMonth === '2026-01' ? ONE_TIME : 0
+  const oneTime = selectedMonth === 'all' || selectedMonth === ONE_TIME_MONTH ? DEFAULT_ONE_TIME : 0
   const adTotal = filtAds.reduce((s, a) => s + (a.pkr || 0), 0)
   const grossProfit = revenue - prodCostTotal - delCostTotal - oneTime
   const netProfit = grossProfit - adTotal
-  const roi = (prodCostTotal + delCostTotal + oneTime + adTotal) > 0
-    ? (netProfit / (prodCostTotal + delCostTotal + oneTime + adTotal) * 100).toFixed(1) : 0
+  const totalCosts = prodCostTotal + delCostTotal + oneTime + adTotal
+  const roi = totalCosts > 0 ? (netProfit / totalCosts * 100).toFixed(1) : 0
+
+  // ── Payments ──
   const receivedTotal = filtPayments.reduce((s, p) => s + (p.amount || 0), 0)
+  const totalRsOwed = payments.reduce((s, p) => s + (p.amount || 0), 0) // all-time received
+  // Outstanding = what's been received all-time vs current filter; show all-time outstanding
+  const allTimeReceived = payments.reduce((s, p) => s + (p.amount || 0), 0)
 
   // ── Chart data ──
   const allMonths = ['all', ...[...new Set(orders.map(o => mo(o.date)))].sort().reverse()]
@@ -82,7 +102,10 @@ export default function Dashboard() {
   const monthlyMap = {}
   orders.forEach(o => {
     const m = mo(o.date)
-    if (!monthlyMap[m]) monthlyMap[m] = { month: m.slice(5) + "'26", Delivered: 0, Returned: 0, Pending: 0 }
+    if (!monthlyMap[m]) {
+      const yearSuffix = "'" + m.slice(2, 4)
+      monthlyMap[m] = { month: m.slice(5) + yearSuffix, Delivered: 0, Returned: 0, Pending: 0 }
+    }
     if (o.status === 'delivered') monthlyMap[m].Delivered++
     else if (o.status === 'returned') monthlyMap[m].Returned++
     else monthlyMap[m].Pending++
@@ -121,8 +144,6 @@ export default function Dashboard() {
 
   return (
     <div style={{ fontFamily: "'DM Sans', sans-serif", background: '#0f0f14', minHeight: '100vh', color: '#e2e8f0' }}>
-      <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet" />
-
       {/* NAV */}
       <div style={{ background: '#1a1a24', borderBottom: '1px solid #2d2d3d', padding: '0 24px', display: 'flex', alignItems: 'center', gap: 4, height: 56 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginRight: 16 }}>
@@ -156,8 +177,8 @@ export default function Dashboard() {
             {[
               { label: 'Net Profit / Loss', value: fmtPKR(netProfit), sub: `ROI: ${roi}%`, color: netProfit >= 0 ? '#22c55e' : '#ef4444', big: true },
               { label: 'Gross Revenue', value: fmtPKR(revenue), sub: `${delivered} delivered`, color: '#3b82f6' },
-              { label: 'Total Costs', value: fmtPKR(prodCostTotal + delCostTotal + oneTime + adTotal), sub: 'Product + Delivery + Ads', color: '#f97316' },
-              { label: 'Received (HBL)', value: fmtPKR(receivedTotal), sub: `${filtPayments.length} payments · ₨13,523 outstanding`, color: '#a855f7' },
+              { label: 'Total Costs', value: fmtPKR(totalCosts), sub: 'Product + Delivery + Ads', color: '#f97316' },
+              { label: 'Received (HBL)', value: fmtPKR(receivedTotal), sub: `${filtPayments.length} payments`, color: '#a855f7' },
             ].map(k => (
               <div key={k.label} style={{ background: '#1a1a24', border: `1px solid ${k.color}30`, borderRadius: 12, padding: 20, borderLeft: `3px solid ${k.color}` }}>
                 <div style={{ fontSize: 12, color: '#64748b', marginBottom: 6 }}>{k.label}</div>
@@ -239,8 +260,8 @@ export default function Dashboard() {
           <div style={{ background: '#1a1a24', borderRadius: 12, padding: 20, border: '1px solid #2d2d3d' }}>
             <div style={{ fontSize: 13, fontWeight: 600, color: '#94a3b8', marginBottom: 16 }}>📊 Full P&L — {selectedMonth === 'all' ? 'All Time' : selectedMonth}</div>
             {[
-              { label: 'Gross Revenue', value: revenue, note: `${delivered} × ₨999`, color: '#22c55e' },
-              { label: '─ Product Cost', value: -prodCostTotal, note: `${total} sent × avg ₨${total > 0 ? Math.round(prodCostTotal / total) : 190}`, color: '#ef4444' },
+              { label: 'Gross Revenue', value: revenue, note: `${delivered} × ₨${SELL}`, color: '#22c55e' },
+              { label: '─ Product Cost', value: -prodCostTotal, note: `${total} sent × avg ₨${total > 0 ? Math.round(prodCostTotal / total) : PROD_COST_DEFAULT}`, color: '#ef4444' },
               { label: '─ Delivery (R&S)', value: -delCostTotal, note: `${total} × ₨${AVG_DEL} avg`, color: '#ef4444' },
               { label: '─ One-Time', value: -oneTime, note: 'logistics setup', color: '#ef4444' },
               { label: '= Gross Profit', value: grossProfit, note: 'before ads', color: grossProfit >= 0 ? '#22c55e' : '#ef4444', bold: true },
@@ -285,7 +306,7 @@ export default function Dashboard() {
                       </td>
                       <td style={{ padding: '8px 14px', fontSize: 12, fontFamily: "'DM Mono', monospace", color: '#f97316' }}>₨{o.product_cost}</td>
                       <td style={{ padding: '8px 14px', fontSize: 12, fontFamily: "'DM Mono', monospace", color: o.status === 'delivered' ? '#22c55e' : '#475569' }}>
-                        {o.status === 'delivered' ? '₨999' : '—'}
+                        {o.status === 'delivered' ? `₨${SELL}` : '—'}
                       </td>
                       <td style={{ padding: '8px 14px' }}>
                         <span style={{ background: o.source === 'telegram' ? '#3b82f620' : o.source === 'seed' ? '#22c55e15' : '#f59e0b15', color: o.source === 'telegram' ? '#3b82f6' : o.source === 'seed' ? '#22c55e' : '#f59e0b', padding: '2px 7px', borderRadius: 4, fontSize: 10, fontWeight: 700 }}>{o.source || 'manual'}</span>
@@ -357,9 +378,9 @@ export default function Dashboard() {
         {tab === 'payments' && <>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 16, marginBottom: 20 }}>
             {[
-              { l: 'Total R&S Owes', v: 40607, c: '#3b82f6', sub: 'All 11 invoices' },
-              { l: 'Received (HBL)', v: receivedTotal, c: '#22c55e', sub: `${filtPayments.length} payments` },
-              { l: 'Outstanding', v: 13523, c: '#f59e0b', sub: 'SI-8032 + SI-7991' },
+              { l: 'Total Received (HBL)', v: allTimeReceived, c: '#22c55e', sub: `${payments.length} payments all time` },
+              { l: 'This Period', v: receivedTotal, c: '#3b82f6', sub: `${filtPayments.length} payments` },
+              { l: 'Outstanding (pending)', v: Math.max(0, allTimeReceived - receivedTotal), c: '#f59e0b', sub: 'filtered vs all-time' },
             ].map(k => (
               <div key={k.l} style={{ background: '#1a1a24', borderRadius: 12, padding: 20, border: `1px solid ${k.c}30`, borderLeft: `3px solid ${k.c}` }}>
                 <div style={{ fontSize: 12, color: '#64748b', marginBottom: 6 }}>{k.l}</div>

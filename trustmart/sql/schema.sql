@@ -8,7 +8,7 @@ create table if not exists orders (
   status text not null check (status in ('delivered','returned','inTransit','pending','failed')),
   tracking text,
   city text,
-  product_cost integer not null default 190,
+  product_cost integer not null default 135,
   source text default 'manual', -- 'seed', 'telegram', 'manual'
   created_at timestamptz default now()
 );
@@ -58,12 +58,9 @@ create policy "public read ad_spend" on ad_spend for select using (true);
 create policy "public read payments" on payments for select using (true);
 create policy "public read settings" on settings for select using (true);
 
--- Allow insert/update via service role key only (used by bot server)
-create policy "service insert orders" on orders for insert with check (true);
-create policy "service update orders" on orders for update using (true);
-create policy "service insert ad_spend" on ad_spend for insert with check (true);
-create policy "service insert payments" on payments for insert with check (true);
-create policy "service update settings" on settings for update using (true);
+-- Writes are done via the service role key (used by the Telegram bot).
+-- The service role bypasses RLS entirely, so no insert/update policies are needed here.
+-- Do NOT add open insert/update policies — that would allow anyone with the anon key to write.
 
 -- ─── SEED DATA: All 117 historical orders ────────────────────────────────────
 insert into orders (id, date, status, tracking, city, product_cost, source) values

@@ -258,10 +258,11 @@ Just send a screenshot of the RS portal or an invoice PDF — I'll extract every
       const delivered = orders.filter(o => o.status === 'delivered').length
       const returned = orders.filter(o => o.status === 'returned').length
       const revenue = delivered * 999
-      const prodCost = orders.reduce((s, o) => s + (o.product_cost || 190), 0)
+      const prodCost = orders.reduce((s, o) => s + (o.product_cost || 135), 0)
       const delCost = orders.length * 212
       const ads = (adsRes.data || []).reduce((s, a) => s + a.pkr, 0)
       const received = (paymentsRes.data || []).reduce((s, p) => s + p.amount, 0)
+      // One-time cost of ₨1500 applied once (Jan 2026 setup)
       const net = revenue - prodCost - delCost - 1500 - ads
 
       const msg = `📊 *Trust Mart Summary (All Time)*
