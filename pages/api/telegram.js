@@ -45,11 +45,13 @@ The user will send one of:
 4. A screenshot or PDF from the RS Courier portal (portal.rscourier.pk) showing order statuses
 5. A screenshot of an R&S invoice/payment
 
-Return JSON in EXACTLY this format (include only relevant sections, omit empty arrays):
+Return JSON in EXACTLY this format (include only relevant sections, omit empty/null fields):
 
 {
-  "type": "mixed", 
+  "type": "mixed",
   "summary": "Human readable summary of what was parsed",
+
+  // NEW orders to insert (never seen before, no tracking match expected):
   "orders": [
     {
       "tracking": "LE7530406xxx",
@@ -59,6 +61,22 @@ Return JSON in EXACTLY this format (include only relevant sections, omit empty a
       "product_cost": 135
     }
   ],
+
+  // UPDATE existing orders by tracking ID (user says to change status of specific order(s)):
+  "update_orders": [
+    {
+      "tracking": "LE7530406xxx",
+      "status": "delivered",
+      "city": "Karachi"
+    }
+  ],
+
+  // BULK UPDATE: change all orders matching a filter (e.g. "mark all pending as inTransit"):
+  "bulk_update": {
+    "filter_status": "pending",
+    "set_status": "inTransit"
+  },
+
   "ad_spend": [
     {
       "date": "2026-03-10",
@@ -79,13 +97,17 @@ Return JSON in EXACTLY this format (include only relevant sections, omit empty a
 Rules:
 - status must be one of: delivered, returned, inTransit, pending, failed
 - "Return In Process", "Ready for Return", "RTS" = returned
-- "In Transit", "Out for Delivery" = inTransit  
+- "In Transit", "Out for Delivery" = inTransit
 - "New Booked", "Booked" = pending
 - product_cost default is 135 (new batch)
 - If no date mentioned, use today: ${today}
 - For invoice PDFs: extract each payment amount and invoice number
+- Use "orders" for NEW entries (bulk booked, new shipments)
+- Use "update_orders" when user says to change/update status of a specific tracking number
+- Use "bulk_update" when user says things like "mark all pending as delivered", "change all inTransit to delivered", "all returned update to failed"
+- Each tracking number maps to ONE row — upsert by tracking. Never duplicate.
 - ONLY return JSON, no explanation text
-- If the message is unclear or you need more info, still return JSON with empty arrays and put your question in the summary field like: {"type": "unclear", "summary": "Which order tracking number should I mark as pending?", "orders": [], "ad_spend": [], "payments": []}
+- If the message is unclear, return: {"type": "unclear", "summary": "your question here", "orders": [], "ad_spend": [], "payments": []}
 - NEVER return plain text, ALWAYS return valid JSON`
 
   const messages = []
@@ -143,9 +165,9 @@ Rules:
 // ─── Save parsed data to Supabase ────────────────────────────────────────────
 async function saveToDb(parsed) {
   const db = getServiceClient()
-  const results = { orders: 0, ad_spend: 0, payments: 0, errors: [] }
+  const results = { orders: 0, updated: 0, bulk_updated: 0, ad_spend: 0, payments: 0, errors: [] }
 
-  // Save orders
+  // Insert/upsert new orders (one row per tracking)
   if (parsed.orders?.length) {
     for (const order of parsed.orders) {
       const id = order.tracking || `tg_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`
@@ -161,6 +183,30 @@ async function saveToDb(parsed) {
       if (error) results.errors.push(`Order ${id}: ${error.message}`)
       else results.orders++
     }
+  }
+
+  // Update specific orders by tracking ID
+  if (parsed.update_orders?.length) {
+    for (const order of parsed.update_orders) {
+      if (!order.tracking) continue
+      const patch = {}
+      if (order.status) patch.status = order.status
+      if (order.city) patch.city = order.city
+      if (order.date) patch.date = order.date
+      const { error } = await db.from('orders').update(patch).eq('tracking', order.tracking)
+      if (error) results.errors.push(`Update ${order.tracking}: ${error.message}`)
+      else results.updated++
+    }
+  }
+
+  // Bulk update orders by status filter
+  if (parsed.bulk_update?.filter_status && parsed.bulk_update?.set_status) {
+    const { filter_status, set_status } = parsed.bulk_update
+    const { error, count } = await db.from('orders')
+      .update({ status: set_status })
+      .eq('status', filter_status)
+    if (error) results.errors.push(`Bulk update: ${error.message}`)
+    else results.bulk_updated = count || 0
   }
 
   // Save ad spend
@@ -204,7 +250,9 @@ function formatConfirmation(parsed, saved) {
   let msg = `✅ *Saved to dashboard*\n\n`
   msg += `${parsed.summary}\n\n`
 
-  if (saved.orders > 0) msg += `📦 ${saved.orders} order(s) updated\n`
+  if (saved.orders > 0) msg += `📦 ${saved.orders} order(s) inserted\n`
+  if (saved.updated > 0) msg += `✏️ ${saved.updated} order(s) status updated\n`
+  if (saved.bulk_updated > 0) msg += `🔄 ${saved.bulk_updated} order(s) bulk updated\n`
   if (saved.ad_spend > 0) msg += `📢 ${saved.ad_spend} ad spend entry saved\n`
   if (saved.payments > 0) msg += `💰 ${saved.payments} payment(s) logged\n`
   if (saved.errors.length > 0) msg += `\n⚠️ Errors: ${saved.errors.join(', ')}`
