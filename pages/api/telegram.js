@@ -84,7 +84,9 @@ Rules:
 - product_cost default is 135 (new batch)
 - If no date mentioned, use today: ${today}
 - For invoice PDFs: extract each payment amount and invoice number
-- ONLY return JSON, no explanation text`
+- ONLY return JSON, no explanation text
+- If the message is unclear or you need more info, still return JSON with empty arrays and put your question in the summary field like: {"type": "unclear", "summary": "Which order tracking number should I mark as pending?", "orders": [], "ad_spend": [], "payments": []}
+- NEVER return plain text, ALWAYS return valid JSON`
 
   const messages = []
 
@@ -124,7 +126,18 @@ Rules:
 
   // Strip markdown code fences if present
   const clean = text.replace(/```json\n?|\n?```/g, '').trim()
-  return JSON.parse(clean)
+  try {
+    return JSON.parse(clean)
+  } catch (e) {
+    // Claude returned plain text instead of JSON — wrap it
+    return {
+      type: 'unclear',
+      summary: clean.slice(0, 200),
+      orders: [],
+      ad_spend: [],
+      payments: []
+    }
+  }
 }
 
 // ─── Save parsed data to Supabase ────────────────────────────────────────────
