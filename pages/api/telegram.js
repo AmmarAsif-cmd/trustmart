@@ -32,83 +32,123 @@ async function urlToBase64(url) {
 async function parseWithClaude(userMessage, imageBase64 = null, imageType = null) {
   const today = new Date().toISOString().split('T')[0]
 
-  const systemPrompt = `You are a data entry assistant for Trust Mart, a Pakistani e-commerce business selling Umrah Saving Boxes at ₨999 each via COD (cash on delivery).
+  const systemPrompt = `You are a smart data entry assistant for Trust Mart, a Pakistani e-commerce business selling Umrah Saving Boxes at ₨999 each via COD (cash on delivery). The courier is R&S (RS Courier).
 
-You extract structured data from messages, screenshots, or PDFs and return ONLY valid JSON.
+You understand natural language in English, Urdu, and mixed (Roman Urdu). You extract structured data and return ONLY valid JSON.
 
 Today's date: ${today}
 
-The user will send one of:
-1. Text about ad spend (e.g. "spent 1500 on ads today")
-2. Text about a payment received from R&S courier (e.g. "received 5143 from RS invoice SI-7991")
-3. Text about order status updates (e.g. "10 delivered 3 returned today from Karachi")
-4. A screenshot or PDF from the RS Courier portal (portal.rscourier.pk) showing order statuses
-5. A screenshot of an R&S invoice/payment
+═══ OUTPUT FORMAT ═══
 
-Return JSON in EXACTLY this format (include only relevant sections, omit empty/null fields):
+Return JSON with ONLY the relevant fields (omit empty arrays/objects):
 
 {
   "type": "mixed",
-  "summary": "Human readable summary of what was parsed",
-
-  // NEW orders to insert (never seen before, no tracking match expected):
-  "orders": [
-    {
-      "tracking": "LE7530406xxx",
-      "date": "2026-03-10",
-      "status": "delivered",
-      "city": "Karachi",
-      "product_cost": 135
-    }
-  ],
-
-  // UPDATE existing orders by tracking ID (user says to change status of specific order(s)):
-  "update_orders": [
-    {
-      "tracking": "LE7530406xxx",
-      "status": "delivered",
-      "city": "Karachi"
-    }
-  ],
-
-  // BULK UPDATE: change all orders matching a filter (e.g. "mark all pending as inTransit"):
-  "bulk_update": {
-    "filter_status": "pending",
-    "set_status": "inTransit"
-  },
-
-  "ad_spend": [
-    {
-      "date": "2026-03-10",
-      "pkr": 1500,
-      "gbp": 0,
-      "note": "TikTok daily"
-    }
-  ],
-  "payments": [
-    {
-      "date": "2026-03-10",
-      "amount": 5143,
-      "note": "SI-7991"
-    }
-  ]
+  "summary": "Brief human-readable summary of what you did",
+  "orders": [...],
+  "update_orders": [...],
+  "bulk_update": {...},
+  "ad_spend": [...],
+  "payments": [...]
 }
 
-Rules:
-- status must be one of: delivered, returned, inTransit, pending, failed
-- "Return In Process", "Ready for Return", "RTS" = returned
-- "In Transit", "Out for Delivery" = inTransit
-- "New Booked", "Booked" = pending
-- product_cost default is 135 (new batch)
-- If no date mentioned, use today: ${today}
-- For invoice PDFs: extract each payment amount and invoice number
-- Use "orders" for NEW entries (bulk booked, new shipments)
-- Use "update_orders" when user says to change/update status of a specific tracking number
-- Use "bulk_update" when user says things like "mark all pending as delivered", "change all inTransit to delivered", "all returned update to failed"
-- Each tracking number maps to ONE row — upsert by tracking. Never duplicate.
-- ONLY return JSON, no explanation text
-- If the message is unclear, return: {"type": "unclear", "summary": "your question here", "orders": [], "ad_spend": [], "payments": []}
-- NEVER return plain text, ALWAYS return valid JSON`
+═══ FIELD SCHEMAS ═══
+
+orders (NEW inserts — first time seeing these tracking numbers, or bulk counts without tracking):
+{ "tracking": "LE7530406123", "date": "2026-03-10", "status": "pending", "city": "Karachi", "product_cost": 135 }
+— tracking is optional for count-based entries (e.g. "booked 10 orders today")
+— generate N separate entries when user gives a count without tracking numbers
+
+update_orders (UPDATE existing rows by tracking number):
+{ "tracking": "LE7530406123", "status": "delivered", "city": "Lahore", "date": "2026-03-10" }
+— only include fields that are changing
+
+bulk_update (UPDATE all rows matching a status filter):
+{ "filter_status": "pending", "set_status": "inTransit" }
+
+ad_spend:
+{ "date": "2026-03-10", "pkr": 1500, "gbp": 0, "note": "TikTok" }
+
+payments:
+{ "date": "2026-03-10", "amount": 5143, "note": "SI-7991" }
+
+═══ STATUS MAPPINGS ═══
+delivered → delivered
+returned / wapas / RTS / "Return In Process" / "Ready for Return" → returned
+"In Transit" / "Out for Delivery" / transit / rawan → inTransit
+pending / booked / "New Booked" / book → pending
+failed / cancel / cancelled → failed
+
+═══ DECISION RULES ═══
+
+Use "orders" when:
+- User mentions NEW shipments/bookings never entered before
+- User gives counts without tracking ("booked 15 orders today", "10 delivered 3 returned from Karachi")
+- Screenshot/PDF shows order list (extract each row)
+
+Use "update_orders" when:
+- User mentions a specific tracking number and wants to change its status/city
+- "LE123 delivered", "mark LE456 as returned", "LE789 city change to Lahore"
+- Multiple specific trackings: "LE123 and LE456 are delivered"
+
+Use "bulk_update" when:
+- User says "all [status] orders → [new status]"
+- "mark all pending as inTransit", "sab pending ko inTransit kar do"
+- "all transit delivered", "change returned to failed"
+- No specific tracking mentioned, affects a whole status group
+
+Use "ad_spend" when:
+- User mentions spending money on ads/TikTok/Facebook/marketing
+- "1500 tiktok", "spent 3000 on ads yesterday", "ads 4200"
+
+Use "payments" when:
+- User mentions receiving money from R&S/RS courier
+- "received 8380 RS SI-8032", "RS ne 5143 diya", "payment from courier"
+
+═══ DATE PARSING ═══
+- "today" / "aaj" → ${today}
+- "yesterday" / "kal" → ${new Date(Date.now() - 86400000).toISOString().split('T')[0]}
+- "Monday", "last week" → calculate from today
+- No date mentioned → use ${today}
+
+═══ EXAMPLES ═══
+
+Input: "LE7530406123 delivered Karachi"
+→ { "type": "update", "summary": "Updated LE7530406123 to delivered in Karachi", "update_orders": [{"tracking":"LE7530406123","status":"delivered","city":"Karachi"}] }
+
+Input: "LE123 aur LE456 wapas agaye"
+→ { "type": "update", "summary": "Marked LE123 and LE456 as returned", "update_orders": [{"tracking":"LE123","status":"returned"},{"tracking":"LE456","status":"returned"}] }
+
+Input: "mark all pending as inTransit"
+→ { "type": "bulk_update", "summary": "Bulk updated all pending orders to inTransit", "bulk_update": {"filter_status":"pending","set_status":"inTransit"} }
+
+Input: "sab inTransit orders delivered kar do"
+→ { "type": "bulk_update", "summary": "Bulk updated all inTransit orders to delivered", "bulk_update": {"filter_status":"inTransit","set_status":"delivered"} }
+
+Input: "10 delivered 3 returned today Karachi"
+→ { "type": "orders", "summary": "Logged 10 delivered and 3 returned from Karachi", "orders": [ ...10 entries status:delivered city:Karachi..., ...3 entries status:returned city:Karachi... ] }
+
+Input: "booked 5 new orders today"
+→ { "type": "orders", "summary": "Logged 5 new pending orders", "orders": [ ...5 entries status:pending... ] }
+
+Input: "spent 2000 on tiktok yesterday"
+→ { "type": "ad_spend", "summary": "Logged ₨2000 TikTok ad spend", "ad_spend": [{"date":"YESTERDAY","pkr":2000,"gbp":0,"note":"TikTok"}] }
+
+Input: "RS ne 8380 diya SI-8032"
+→ { "type": "payments", "summary": "Logged ₨8380 payment from R&S invoice SI-8032", "payments": [{"date":"${today}","amount":8380,"note":"SI-8032"}] }
+
+Input: "spent 1500 ads and received 5143 from RS SI-7991"
+→ { "type": "mixed", "summary": "Logged ad spend and payment", "ad_spend": [...], "payments": [...] }
+
+Input: "LE123 city change to Lahore"
+→ { "type": "update", "summary": "Updated city of LE123 to Lahore", "update_orders": [{"tracking":"LE123","city":"Lahore"}] }
+
+═══ IMPORTANT ═══
+- Each tracking number = ONE row in DB. Never create duplicate entries for the same tracking.
+- product_cost default = 135
+- For count-based entries (no tracking), generate that exact number of order objects
+- If message is completely unclear: {"type":"unclear","summary":"I didn't understand. Can you clarify? E.g. 'LE123 delivered' or 'spent 1500 on ads'"}
+- ONLY return JSON. No explanation text. ALWAYS valid JSON.`
 
   const messages = []
 
@@ -247,16 +287,23 @@ async function saveToDb(parsed) {
 
 // ─── Format confirmation message ─────────────────────────────────────────────
 function formatConfirmation(parsed, saved) {
-  let msg = `✅ *Saved to dashboard*\n\n`
-  msg += `${parsed.summary}\n\n`
+  // If Claude couldn't understand, just echo the question back
+  if (parsed.type === 'unclear') {
+    return `🤔 ${parsed.summary}`
+  }
 
+  const total = saved.orders + saved.updated + saved.bulk_updated + saved.ad_spend + saved.payments
+  if (total === 0 && saved.errors.length === 0) {
+    return `ℹ️ Nothing to save — I understood your message but found no data to record.\n\n_${parsed.summary}_`
+  }
+
+  let msg = `✅ *Saved to dashboard*\n\n${parsed.summary}\n\n`
   if (saved.orders > 0) msg += `📦 ${saved.orders} order(s) inserted\n`
-  if (saved.updated > 0) msg += `✏️ ${saved.updated} order(s) status updated\n`
+  if (saved.updated > 0) msg += `✏️ ${saved.updated} order(s) updated\n`
   if (saved.bulk_updated > 0) msg += `🔄 ${saved.bulk_updated} order(s) bulk updated\n`
   if (saved.ad_spend > 0) msg += `📢 ${saved.ad_spend} ad spend entry saved\n`
   if (saved.payments > 0) msg += `💰 ${saved.payments} payment(s) logged\n`
   if (saved.errors.length > 0) msg += `\n⚠️ Errors: ${saved.errors.join(', ')}`
-
   msg += `\n\n_Dashboard auto-refreshes every 30s_`
   return msg
 }
